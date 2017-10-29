@@ -35,12 +35,12 @@ metadata {
    attribute "lastCheckin", "String"
    attribute "lastOpened", "String"
    
-   fingerprint profileId: "0104", deviceId: "0104", inClusters: "0000, 0003", outClusters: "0000, 0004, 0003, 0006, 0008, 0005", manufacturer: "LUMI", model: "lumi.sensor_magnet", deviceJoinName: "Xiaomi Door Sensor"
+   fingerprint profileId: "0104", deviceId: "0104", inClusters: "0000, 0003, FFFF, 0019", outClusters: "0000, 0004, 0003, 0006, 0008, 0005 0019", manufacturer: "LUMI", model: "lumi.sensor_magnet", deviceJoinName: "Xiaomi Door Sensor"
    
    command "enrollResponse"
    command "resetClosed"
    command "resetOpen"
- 
+   command "Refresh"
    }
     
    simulator {
@@ -73,15 +73,18 @@ metadata {
 	  standardTile("resetOpen", "device.resetOpen", inactiveLabel: false, decoration: "flat", width: 3, height: 1) {
 			state "default", action:"resetOpen", label: "Override Open", icon:"st.contact.contact.open"
 	  }
-      
+      standardTile("refresh", "command.refresh", inactiveLabel: false) {
+			state "default", label:'refresh', action:"refresh.refresh", icon:"st.secondary.refresh-icon"
+	  }
 
       main (["contact"])
-      details(["contact","battery","icon","lastopened","resetClosed","resetOpen"])
+      details(["contact","battery","icon","lastopened","resetClosed","resetOpen","refresh"])
    }
 }
 
 def parse(String description) {
-   log.debug "Parsing '${description}'"
+   def linkText = getLinkText(device)
+   log.debug "${linkText}: Parsing '${description}'"
    
 //  send event for heartbeat    
    def now = new Date().format("yyyy MMM dd EEE h:mm:ss a", location.timeZone)
@@ -89,24 +92,57 @@ def parse(String description) {
     
    Map map = [:]
 
-   log.debug "${resultMap}"
-   if (description?.startsWith('on/off: ')) {
+   if (description?.startsWith('on/off: ')) 
+    {
       map = parseCustomMessage(description) 
       sendEvent(name: "lastOpened", value: now)
-	}
-   if (description?.startsWith('catchall:')) 
+	} 
+    else if (description?.startsWith('catchall:')) 
+    {
       map = parseCatchAllMessage(description)
-   log.debug "Parse returned $map"
+    } 
+    else if (description?.startsWith("read attr - raw: "))
+    {
+      map = parseReadAttrMessage(description)  
+    }
+   log.debug "${linkText}: Parse returned $map"
    def results = map ? createEvent(map) : null
 
    return results;
 }
 
-private Map getBatteryResult(rawValue) {
-	log.debug 'Battery'
-	def linkText = getLinkText(device)
+private Map parseReadAttrMessage(String description) {
+    	def result = [
+		name: 'Model',
+		value: ''
+	]
+    def cluster
+    def attrId
+    def value
+        
+    cluster = description.split(",").find {it.split(":")[0].trim() == "cluster"}?.split(":")[1].trim()
+    attrId = description.split(",").find {it.split(":")[0].trim() == "attrId"}?.split(":")[1].trim()
+    value = description.split(",").find {it.split(":")[0].trim() == "value"}?.split(":")[1].trim()
+    //log.debug "cluster: ${cluster}, attrId: ${attrId}, value: ${value}"
+    
+    if (cluster == "0000" && attrId == "0005") 
+    {
+        for (int i = 0; i < value.length(); i+=2) 
+        {
+            def str = value.substring(i, i+2);
+            def NextChar = (char)Integer.parseInt(str, 16);
+            result.value = result.value + NextChar
+        }
+    }
+    //log.debug "Result: ${result}"
+    return result
+}
 
-	log.debug rawValue
+private Map getBatteryResult(rawValue) {
+    def linkText = getLinkText(device)
+    //log.debug '${linkText} Battery'
+
+	//log.debug rawValue
 
 	def result = [
 		name: 'battery',
@@ -127,6 +163,7 @@ private Map getBatteryResult(rawValue) {
 }
 
 private Map parseCatchAllMessage(String description) {
+    def linkText = getLinkText(device)
 	Map resultMap = [:]
 	def cluster = zigbee.parse(description)
 	log.debug cluster
@@ -137,11 +174,11 @@ private Map parseCatchAllMessage(String description) {
 			break
 
 			case 0xFC02:
-			log.debug 'ACCELERATION'
+			log.debug '${linkText}: ACCELERATION'
 			break
 
 			case 0x0402:
-			log.debug 'TEMP'
+			log.debug '${linkText}: TEMP'
 				// temp is last 2 data values. reverse to swap endian
 				String temp = cluster.data[-2..-1].reverse().collect { cluster.hex1(it) }.join()
 				def value = getTemperature(temp)
@@ -165,11 +202,13 @@ private boolean shouldProcessMessage(cluster) {
 
 
 def configure() {
+    def linkText = getLinkText(device)
+
 	String zigbeeEui = swapEndianHex(device.hub.zigbeeEui)
-	log.debug "${device.deviceNetworkId}"
+	log.debug "${linkText}: ${device.deviceNetworkId}"
     def endpointId = 1
-    log.debug "${device.zigbeeId}"
-    log.debug "${zigbeeEui}"
+    log.debug "${linkText}: ${device.zigbeeId}"
+    log.debug "${linkText}: ${zigbeeEui}"
 	def configCmds = [
 			//battery reporting and heartbeat
 			"zdo bind 0x${device.deviceNetworkId} 1 ${endpointId} 1 {${device.zigbeeId}} {}", "delay 200",
@@ -182,12 +221,13 @@ def configure() {
 			"send 0x${device.deviceNetworkId} 1 1", "delay 500",
 	]
 
-	log.debug "configure: Write IAS CIE"
+	log.debug "${linkText}: configure: Write IAS CIE"
 	return configCmds
 }
 
 def enrollResponse() {
-	log.debug "Enrolling device into the IAS Zone"
+    def linkText = getLinkText(device)
+    log.debug "${linkText}: Enrolling device into the IAS Zone"
 	[
 			// Enrolling device into the IAS Zone
 			"raw 0x500 {01 23 00 00 00}", "delay 200",
@@ -197,7 +237,8 @@ def enrollResponse() {
 
 /*
 def refresh() {
-	log.debug "Refreshing Battery"
+	def linkText = getLinkText(device)
+    log.debug "${linkText}: Refreshing Battery"
     def endpointId = 0x01
 	[
 	    "st rattr 0x${device.deviceNetworkId} ${endpointId} 0x0000 0x0000", "delay 200"
@@ -207,11 +248,16 @@ def refresh() {
 */
 
 def refresh() {
-	log.debug "refreshing"
+    def result
+	def linkText = getLinkText(device)
+    log.debug "${linkText}: refreshing"
     [
-        "st rattr 0x${device.deviceNetworkId} 1 0 0", "delay 500",
-        "st rattr 0x${device.deviceNetworkId} 1 0", "delay 250",
-    ]
+        "st rattr 0x${device.deviceNetworkId} 1 0 5", "delay 5",
+    //    "st rattr 0x${device.deviceNetworkId} 1 0", "delay 250",
+    ] + enrollResponse()
+    //zigbee.readAttribute(0x0000, 0x05)
+    
+    //zigbee.configureReporting(0x0001, 0x0021, 0x20, 300, 600, 0x01)
 }
 
 
@@ -273,12 +319,14 @@ def resetOpen() {
 
 def installed() {
 // Device wakes up every 1 hour, this interval allows us to miss one wakeup notification before marking offline
-	log.debug "Configured health checkInterval when installed()"
+    def linkText = getLinkText(device)
+    log.debug "${linkText}: Configured health checkInterval when installed()"
 	sendEvent(name: "checkInterval", value: 2 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
 }
 
 def updated() {
 // Device wakes up every 1 hours, this interval allows us to miss one wakeup notification before marking offline
-	log.debug "Configured health checkInterval when updated()"
+    def linkText = getLinkText(device)
+    log.debug "${linkText}: Configured health checkInterval when updated()"
 	sendEvent(name: "checkInterval", value: 2 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
 }
