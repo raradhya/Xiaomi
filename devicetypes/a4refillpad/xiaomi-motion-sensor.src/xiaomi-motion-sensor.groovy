@@ -41,6 +41,7 @@ metadata {
     	fingerprint profileId: "0104", deviceId: "0104", inClusters: "0000, 0003, FFFF, 0019", outClusters: "0000, 0004, 0003, 0006, 0008, 0005, 0019", manufacturer: "LUMI", model: "lumi.sensor_motion", deviceJoinName: "Xiaomi Motion"
         
         command "reset"
+        command "Refresh"
         
 	}
 
@@ -81,16 +82,19 @@ metadata {
         valueTile("lastmotion", "device.lastMotion", decoration: "flat", inactiveLabel: false, width: 4, height: 1) {
 			state "default", label:'${currentValue}'
         }
+        standardTile("refresh", "command.refresh", inactiveLabel: false) {
+			state "default", label:'refresh', action:"refresh.refresh", icon:"st.secondary.refresh-icon"
+	   }
 
 		main(["motion"])
-		details(["motion", "battery", "icon", "lastmotion", "reset" ])
+		details(["motion", "battery", "icon", "lastmotion", "reset", "refresh"])
 	}
 }
 
 def parse(String description) {
-	log.debug "description: $description"
-    def value = zigbee.parse(description)?.text
-    log.debug "Parse: $value"
+	def linkText = getLinkText(device)
+    log.debug "${linkText} Parsing: $description"
+
 	Map map = [:]
 	if (description?.startsWith('catchall:')) {
 		map = parseCatchAllMessage(description)
@@ -99,7 +103,7 @@ def parse(String description) {
 		map = parseReportAttributeMessage(description)
 	}
  
-	log.debug "Parse returned $map"
+	log.debug "${linkText} Parse returned: $map"
 	def result = map ? createEvent(map) : null
 //  send event for heartbeat    
     def now = new Date().format("yyyy MMM dd EEE h:mm:ss a", location.timeZone)
@@ -107,7 +111,7 @@ def parse(String description) {
     
     if (description?.startsWith('enroll request')) {
     	List cmds = enrollResponse()
-        log.debug "enroll response: ${cmds}"
+        log.debug "${linkText} enroll response: ${cmds}"
         result = cmds?.collect { new physicalgraph.device.HubAction(it) }
     }
 
@@ -115,10 +119,10 @@ def parse(String description) {
 }
 
 private Map getBatteryResult(rawValue) {
-	log.debug 'Battery'
+	//log.debug 'Battery'
 	def linkText = getLinkText(device)
 
-	log.debug rawValue
+	//log.debug rawValue
 
 	def result = [
 		name: 'battery',
@@ -140,6 +144,8 @@ private Map getBatteryResult(rawValue) {
 }
 
 private Map parseCatchAllMessage(String description) {
+    def linkText = getLinkText(device)
+    
 	Map resultMap = [:]
 	def cluster = zigbee.parse(description)
 	log.debug cluster
@@ -150,11 +156,11 @@ private Map parseCatchAllMessage(String description) {
 			break
 
 			case 0xFC02:
-			log.debug 'ACCELERATION'
+			log.debug '${linkText}: ACCELERATION'
 			break
 
 			case 0x0402:
-			log.debug 'TEMP'
+			log.debug '${linkText}: TEMP'
 				// temp is last 2 data values. reverse to swap endian
 				String temp = cluster.data[-2..-1].reverse().collect { cluster.hex1(it) }.join()
 				def value = getTemperature(temp)
@@ -178,11 +184,12 @@ private boolean shouldProcessMessage(cluster) {
 
 
 def configure() {
+	def linkText = getLinkText(device)
 	String zigbeeEui = swapEndianHex(device.hub.zigbeeEui)
-	log.debug "${device.deviceNetworkId}"
+	log.debug "${linkText}: ${device.deviceNetworkId}"
     def endpointId = 1
-    log.debug "${device.zigbeeId}"
-    log.debug "${zigbeeEui}"
+    log.debug "${linkText}: ${device.zigbeeId}"
+    log.debug "${linkText}: ${zigbeeEui}"
 	def configCmds = [
 			//battery reporting and heartbeat
 			"zdo bind 0x${device.deviceNetworkId} 1 ${endpointId} 1 {${device.zigbeeId}} {}", "delay 200",
@@ -195,12 +202,13 @@ def configure() {
 			"send 0x${device.deviceNetworkId} 1 1", "delay 500",
 	]
 
-	log.debug "configure: Write IAS CIE"
+	log.debug "${linkText} configure: Write IAS CIE"
 	return configCmds
 }
 
 def enrollResponse() {
-	log.debug "Enrolling device into the IAS Zone"
+    def linkText = getLinkText(device)
+    log.debug "${linkText}: Enrolling device into the IAS Zone"
 	[
 			// Enrolling device into the IAS Zone
 			"raw 0x500 {01 23 00 00 00}", "delay 200",
@@ -209,12 +217,15 @@ def enrollResponse() {
 }
 
 def refresh() {
-	log.debug "Refreshing Battery"
-    def endpointId = 0x01
-	[
-	    "st rattr 0x${device.deviceNetworkId} ${endpointId} 0x0000 0x0000", "delay 200"
+	def linkText = getLinkText(device)
+    log.debug "${linkText}: Refreshing Battery"
+//    def endpointId = 0x01
+//	[
+//	    "st rattr 0x${device.deviceNetworkId} ${endpointId} 0x0000 0x0000", "delay 200"
 //	    "st rattr 0x${device.deviceNetworkId} ${endpointId} 0x0000", "delay 200"
-	] //+ enrollResponse()
+//	] //+ enrollResponse()
+
+    zigbee.configureReporting(0x0001, 0x0021, 0x20, 300, 600, 0x01)
 }
 
 private Map parseReportAttributeMessage(String description) {
@@ -237,6 +248,20 @@ private Map parseReportAttributeMessage(String description) {
         if (value == "active") runIn(settings.motionReset, stopMotion)
     	resultMap = getMotionResult(value)
     } 
+    else if (descMap.cluster == "0000" && descMap.attrId == "0005") 
+    {
+        def result = [
+			name: 'Model',
+			value: ''
+		]
+        for (int i = 0; i < descMap.value.length(); i+=2) 
+        {
+            def str = descMap.value.substring(i, i+2);
+            def NextChar = (char)Integer.parseInt(str, 16);
+            result.value = result.value + NextChar
+        }
+        resultMap = result
+    }
 	return resultMap
 }
  
@@ -246,6 +271,7 @@ private Map parseCustomMessage(String description) {
 }
 
 private Map parseIasMessage(String description) {
+    def linkText = getLinkText(device)
     List parsedMsg = description.split(' ')
     String msgCode = parsedMsg[2]
     
@@ -260,7 +286,7 @@ private Map parseIasMessage(String description) {
             break
 
         case '0x0022': // Tamper Alarm
-        	log.debug 'motion with tamper alarm'
+        	log.debug '${linkText}: motion with tamper alarm'
         	resultMap = getMotionResult('active')
             break
 
@@ -268,7 +294,7 @@ private Map parseIasMessage(String description) {
             break
 
         case '0x0024': // Supervision Report
-        	log.debug 'no motion with tamper alarm'
+        	log.debug '${linkText}: no motion with tamper alarm'
         	resultMap = getMotionResult('inactive')
             break
 
@@ -276,7 +302,7 @@ private Map parseIasMessage(String description) {
             break
 
         case '0x0026': // Trouble/Failure
-        	log.debug 'motion with failure alarm'
+        	log.debug '${linkText}: motion with failure alarm'
         	resultMap = getMotionResult('active')
             break
 
@@ -288,8 +314,8 @@ private Map parseIasMessage(String description) {
 
 
 private Map getMotionResult(value) {
-	log.debug 'motion'
-	String linkText = getLinkText(device)
+	def linkText = getLinkText(device)
+    //log.debug "${linkText}: motion"
 	String descriptionText = value == 'active' ? "${linkText} detected motion" : "${linkText} motion has stopped"
 	def commands = [
 		name: 'motion',
@@ -321,12 +347,14 @@ def reset() {
 
 def installed() {
 // Device wakes up every 1 hour, this interval allows us to miss one wakeup notification before marking offline
-	log.debug "Configured health checkInterval when installed()"
+	def linkText = getLinkText(device)
+    log.debug "${linkText}: Configured health checkInterval when installed()"
 	sendEvent(name: "checkInterval", value: 2 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
 }
 
 def updated() {
 // Device wakes up every 1 hours, this interval allows us to miss one wakeup notification before marking offline
-	log.debug "Configured health checkInterval when updated()"
+	def linkText = getLinkText(device)
+    log.debug "${linkText}: Configured health checkInterval when updated()"
 	sendEvent(name: "checkInterval", value: 2 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
 }
